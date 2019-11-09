@@ -211,15 +211,19 @@ bool GemmExternCpu(
     bool trans_a,
     bool trans_b,
     const std::string& name) {
-  ORT_ENFORCE(A->shape.size() == 2);
-  ORT_ENFORCE(B->shape.size() == 2);
-
   if (!ShouldUseMatMulExtern())
     return false;
 
-  tvm::Array<tvm::Expr> out_shape;
-  out_shape.push_back(A->shape[trans_a ? 1 : 0]);
-  out_shape.push_back(B->shape[trans_b ? 0 : 1]);
+  if (A->shape.size() == 1 && B->shape.size() == 1)
+    return false;  // TVM extern cannot have output shape being empty
+
+  // TODO: add support for mixed precisions
+  if (A->dtype != B->dtype ||
+      !A->dtype.is_float() ||
+      A->dtype.bits() != 32)
+    return false;
+
+  tvm::Array<tvm::Expr> out_shape = tvm_codegen::ComputeMatMulShape(A->shape, B->shape, trans_a, trans_b);
 
   Y = topi::detail::make_extern(
       {out_shape}, {A->dtype}, {A, B},
