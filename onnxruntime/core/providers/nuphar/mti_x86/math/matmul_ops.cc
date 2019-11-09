@@ -162,7 +162,7 @@ TVM_REGISTER_GLOBAL("tvm.contrib.onnxruntime.batched_matmul_cpu")
         int64_t step_b = stride_B[permute_B[B->ndim - 3]];
         int64_t ldb = stride_B[permute_B[B->ndim - (trans_b ? 1 : 2)]];
 
-        for (size_t i = 0; i < num_matmuls; i++) {
+        for (int i = 0; i < num_matmuls; i++) {
           math::GemmEx<float, concurrency::ThreadPool>(
               trans_a ? CblasTrans : CblasNoTrans,
               trans_b ? CblasTrans : CblasNoTrans,

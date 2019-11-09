@@ -134,15 +134,25 @@ static bool MatMulF32ExternCPU(
   const std::vector<int32_t>* p_permute_B = nullptr;
   tvm::Tensor root_A = find_transposed_input(A, permute_A);
   tvm::Tensor root_B = find_transposed_input(B, permute_B);
-  if (A->shape.size() == B->shape.size()) {
+  if (A->shape.size() == B->shape.size() && A->shape.size() > 2) {
     // currently only fuse Transpose into MatMul when rank(A) == rank(B)
-    if (CanPermuteBeFusedInMatMul(permute_A)) {
-      A = root_A;
-      p_permute_A = &permute_A;
+    // make sure no broadcasting in MatMul
+    bool no_broadcast = true;
+    for (size_t i = 0; i < A->shape.size() - 2; ++i) {
+      if (!tvm::ir::Equal(A->shape[i], B->shape[i])) {
+        no_broadcast = false;
+        break;
+      }
     }
-    if (CanPermuteBeFusedInMatMul(permute_B)) {
-      B = root_B;
-      p_permute_B = &permute_B;
+    if (no_broadcast) {
+      if (CanPermuteBeFusedInMatMul(permute_A)) {
+        A = root_A;
+        p_permute_A = &permute_A;
+      }
+      if (CanPermuteBeFusedInMatMul(permute_B)) {
+        B = root_B;
+        p_permute_B = &permute_B;
+      }
     }
   }
 
