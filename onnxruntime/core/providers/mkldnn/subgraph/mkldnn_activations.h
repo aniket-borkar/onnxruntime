@@ -26,8 +26,9 @@ class MklDnnRelu : public MklDnnKernel {
   Status CreatePrimitives(const OrtCustomOpApi* api,
                           OrtKernelContext* context,
                           mkldnn::engine& cpu_engine,
+                          mkldnn::engine& gpu_engine,
                           std::vector<mkldnn::primitive>& net,
-                          std::vector<std::unordered_map<int, mkldnn::memory>> &net_args) {
+                          std::vector<std::unordered_map<int, mkldnn::memory>>& net_args) {
     Ort::CustomOpApi ort{*api};
     int input_index = mklnode_ptr_->input_start_index < 0 ? 0 : mklnode_ptr_->input_start_index;
 
@@ -44,24 +45,25 @@ class MklDnnRelu : public MklDnnKernel {
       mkldnn::memory::dims dims(xdim);
 
       ort_source_format_ = GetSourceFormat(static_cast<int>(xdim));
-      source_format_ = ort_source_format_;
 
-	  x_shape = TensorShape(xshape, xdim);
+      x_shape = TensorShape(xshape, xdim);
 
       mkldnn::memory::dims src_dims(
           x_shape.GetDims().begin(), x_shape.GetDims().end());
 
       ort_source_desc_ = mkldnn::memory::desc(
-          {src_dims}, MklDnnType<T>(), source_format_);
+          {src_dims}, MklDnnType<T>(), ort_source_format_);
       source_desc_ = ort_source_desc_;
       src_md_.reset(new mkldnn::memory::desc(
-          {src_dims}, MklDnnType<T>(), source_format_));
+          {src_dims}, MklDnnType<T>(), ort_source_format_));
       src_mem_.reset(
-          new mkldnn::memory({{src_dims}, MklDnnType<T>(), source_format_}, cpu_engine, nullptr));
+          new mkldnn::memory({{src_dims}, MklDnnType<T>(), ort_source_format_}, cpu_engine, nullptr));
+      src_mem_gpu_.reset(new mkldnn::memory(*src_md_, gpu_engine));
     } else {
       src_md_.reset(
           new mkldnn::memory::desc(parents_[0].get()->primitive_dst_desc_));
       src_mem_ = parents_[0].get()->primitive_dst_mem_;
+      src_mem_gpu_.reset(new mkldnn::memory(*src_md_, gpu_engine));
       x_shape = parents_[0].get()->primitive_dst_shape_;
       ort_source_format_ = parents_[0].get()->ort_source_format_;
       ort_source_desc_ = parents_[0].get()->ort_source_desc_;
@@ -76,9 +78,9 @@ class MklDnnRelu : public MklDnnKernel {
         mkldnn::prop_kind::forward_inference, algo, *src_md_, 0));
 
     relu_fwd_pd_.reset(new mkldnn::eltwise_forward::primitive_desc(
-        *fwd_desc_, cpu_engine));
+        *fwd_desc_, gpu_engine));
 
-	primitive_src_desc_ = relu_fwd_pd_.get()->src_desc();
+    primitive_src_desc_ = relu_fwd_pd_.get()->src_desc();
     primitive_dst_desc_ = relu_fwd_pd_.get()->dst_desc();
 
     if (mklnode_ptr_->output_index >= 0) {
@@ -97,20 +99,30 @@ class MklDnnRelu : public MklDnnKernel {
       primitive_dst_mem_.reset(new mkldnn::memory(relu_fwd_pd_.get()->dst_desc(), cpu_engine));
     }
 
+    primitive_dst_mem_gpu_.reset(new mkldnn::memory(relu_fwd_pd_.get()->dst_desc(), gpu_engine));
+
     relu_fwd_.reset(
         new mkldnn::eltwise_forward(*relu_fwd_pd_));
 
+    //reorder src mem from cpu to gpu
+    net.push_back(mkldnn::reorder(*src_mem_, *src_mem_gpu_));
+    net_args.push_back({{MKLDNN_ARG_SRC, *src_mem_},
+                        {MKLDNN_ARG_DST, *src_mem_gpu_}});
+
     net.push_back(*relu_fwd_);
 
-	net_args.push_back({{MKLDNN_ARG_SRC, *src_mem_},
-               {MKLDNN_ARG_DST, *primitive_dst_mem_}});
-
-    if (mklnode_ptr_->output_index >= 0) {
-      // one of the end nodes. Allocate output buffer memory and
-      // reorder is necessary
-      mkldnn::memory::data_type t = MklDnnType<T>();
-      InitDstReorderOutput(cpu_engine, t, net, net_args);
-    }
+    net_args.push_back({{MKLDNN_ARG_SRC, *src_mem_gpu_},
+                        {MKLDNN_ARG_DST, *primitive_dst_mem_gpu_}});
+    //reorder dst mem from gpu to cpu
+    net.push_back(mkldnn::reorder(*primitive_dst_mem_gpu_, *primitive_dst_mem_));
+    net_args.push_back({{MKLDNN_ARG_SRC, *primitive_dst_mem_gpu_},
+                        {MKLDNN_ARG_DST, *primitive_dst_mem_}});
+    //if (mklnode_ptr_->output_index >= 0) {
+    //  // one of the end nodes. Allocate output buffer memory and
+    //  // reorder is necessary
+    //  mkldnn::memory::data_type t = MklDnnType<T>();
+    //  InitDstReorderOutput(cpu_engine, t, net, net_args);
+    //}
 
     return Status::OK();
   }
@@ -145,12 +157,18 @@ class MklDnnRelu : public MklDnnKernel {
 
  private:
   std::shared_ptr<mkldnn::memory> src_mem_;
+  std::shared_ptr<mkldnn::memory> src_mem_gpu_;
 
   std::unique_ptr<mkldnn::eltwise_forward::desc> fwd_desc_;
   std::unique_ptr<mkldnn::eltwise_forward::primitive_desc> relu_fwd_pd_;
   std::unique_ptr<mkldnn::primitive> relu_fwd_;
 
   std::unique_ptr<mkldnn::memory::desc> src_md_;
+
+  //static mkldnn::engine& GetGPUEngine() {
+  //  static mkldnn::engine gpu_engine = mkldnn::engine(mkldnn::engine::kind::gpu, 0);
+  //  return gpu_engine;
+  //}
 };
 }  // namespace mkl_dnn
 }  // namespace onnxruntime

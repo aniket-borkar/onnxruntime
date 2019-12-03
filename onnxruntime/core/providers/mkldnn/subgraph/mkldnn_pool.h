@@ -123,13 +123,13 @@ class MklDnnPool : public MklDnnKernel {
       src_mem_ = parents_[0].get()->primitive_dst_mem_;
     }
 
-	primitive_src_desc_ = fwd_primitive_desc_.get()->src_desc();
+    primitive_src_desc_ = fwd_primitive_desc_.get()->src_desc();
     primitive_dst_desc_ = fwd_primitive_desc_.get()->dst_desc();
 
     src_size_ = fwd_primitive_desc_.get()->src_desc().get_size();
     dst_size_ = fwd_primitive_desc_.get()->dst_desc().get_size();
 
-	// reorder source memory for best performance (AVX512);
+    // reorder source memory for best performance (AVX512);
     if (primitive_src_desc_ != source_desc_) {
       mkldnn::memory::dims src_dims(x_shape_.GetDims().begin(), x_shape_.GetDims().end());
       auto pd = mkldnn::memory::desc(source_desc_);

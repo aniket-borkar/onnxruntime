@@ -26,8 +26,8 @@ class SubgraphPrimitive : public PrimitiveBase {
   SubgraphPrimitive(const OrtCustomOpApi* api,
                     OrtKernelContext* context,
                     const SubgraphParams& params)
-      : cpu_engine_(GetEngine()) {
-    context_.stream.reset(new mkldnn::stream(cpu_engine_));
+      : cpu_engine_(GetEngine()), gpu_engine_(GetGPUEngine()) {
+    context_.stream.reset(new mkldnn::stream(gpu_engine_));
 
     if (context_.net.size() == 0) {
       CreateKernels(params);
@@ -60,9 +60,14 @@ class SubgraphPrimitive : public PrimitiveBase {
   ~SubgraphPrimitive() = default;
 
  private:
+
+  static mkldnn::engine& GetGPUEngine() {
+    static mkldnn::engine gpu_engine = mkldnn::engine(mkldnn::engine::kind::gpu, 0);
+    return gpu_engine;
+  }
   void CreateKernels(const SubgraphParams& params) {
     for (const auto& mkldnn_node : params.subgraph->mkldnn_nodes) {
-      if (mkldnn_node.name == "Conv") {
+      if (mkldnn_node.name == "ConvUndoThis") {
         std::ostringstream os;
         os << "Conv-" << mkldnn_node.node_index << "-";
         std::shared_ptr<MklDnnConv<T>> kernel;
@@ -181,7 +186,7 @@ class SubgraphPrimitive : public PrimitiveBase {
     // Propagate mkldnn block format
     // dst format of current node to src format of next node
     for (auto& kernel : context_.kernels) {
-      Status status = kernel->CreatePrimitives(api, context, cpu_engine_, context_.net, context_.net_args);
+      Status status = kernel->CreatePrimitives(api, context, cpu_engine_, gpu_engine_, context_.net, context_.net_args);
       if (status.IsOK())
         kernel->ReorderWeights(api, context, cpu_engine_);
       else
@@ -192,6 +197,7 @@ class SubgraphPrimitive : public PrimitiveBase {
 
   SubgraphContext context_;
   mkldnn::engine& cpu_engine_;
+  mkldnn::engine& gpu_engine_;
 };
 
 // Pool which allows for reuse of MKLDNN Conv primitives which are expensive to instantiate.
