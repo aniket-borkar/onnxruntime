@@ -67,7 +67,7 @@ class SubgraphPrimitive : public PrimitiveBase {
   }
   void CreateKernels(const SubgraphParams& params) {
     for (const auto& mkldnn_node : params.subgraph->mkldnn_nodes) {
-      if (mkldnn_node.name == "ConvUndoThis") {
+      if (mkldnn_node.name == "Conv") {
         std::ostringstream os;
         os << "Conv-" << mkldnn_node.node_index << "-";
         std::shared_ptr<MklDnnConv<T>> kernel;
