@@ -48,7 +48,7 @@ class MklDnnPool : public MklDnnKernel {
       // source_desc is propagating format. input to this op.
       source_desc_ = mkldnn::memory::desc({src_dims_mkl}, MklDnnType<T>(), ort_source_format_);
 
-      // reorder for better performance
+      //// reorder for better performance
       mkldnn::memory::format_tag src_format = GetAVXFormat(src_dims_mkl);
       src_md_.reset(new mkldnn::memory::desc({src_dims_mkl}, MklDnnType<T>(), src_format));
     } else {
@@ -62,14 +62,15 @@ class MklDnnPool : public MklDnnKernel {
       ort_source_desc_ = parents_[0].get()->ort_source_desc_;
       source_desc_ = parents_[0].get()->primitive_dst_desc_;
 
-      if (source_desc_ == ort_source_desc_) {
-        // reorder for better performance
-        mkldnn::memory::format_tag fmt = GetAVXFormat(src_dims_mkl);
-        src_md_.reset(new mkldnn::memory::desc(
-            {src_dims_mkl}, MklDnnType<T>(), fmt));
-      } else {
-        src_md_.reset(new mkldnn::memory::desc(parents_[0].get()->primitive_dst_mem_->get_desc()));
-      }
+      //if (source_desc_ == ort_source_desc_) {
+      //  // reorder for better performance
+      //  mkldnn::memory::format_tag fmt = GetAVXFormat(src_dims_mkl);
+      //  src_md_.reset(new mkldnn::memory::desc(
+      //      {src_dims_mkl}, MklDnnType<T>(), fmt));
+      //} else {
+      //  src_md_.reset(new mkldnn::memory::desc(parents_[0].get()->primitive_dst_mem_->get_desc()));
+      //}
+      src_md_.reset(new mkldnn::memory::desc(parents_[0].get()->primitive_dst_mem_->get_desc()));
     }
 
     const auto& x_dims = x_shape_.GetDims();
@@ -114,15 +115,19 @@ class MklDnnPool : public MklDnnKernel {
         padding_left_mkl, padding_right_mkl));
 
     fwd_primitive_desc_.reset(new mkldnn::pooling_forward::primitive_desc(
-        *fwd_desc_, cpu_engine));
+        *fwd_desc_, gpu_engine));
 
     if (mklnode_ptr_->parent_nodes.empty()) {
       // Sub-graph's first node. Read input from input buffer
       src_mem_.reset(new mkldnn::memory(
           fwd_primitive_desc_.get()->src_desc(), cpu_engine, nullptr));
+      src_mem_gpu_.reset(new mkldnn::memory(
+          fwd_primitive_desc_.get()->src_desc(), gpu_engine));
     } else {
       // Sub-graph's inner node. set input to parent's output
       src_mem_ = parents_[0].get()->primitive_dst_mem_;
+      src_mem_gpu_.reset(new mkldnn::memory(
+          fwd_primitive_desc_.get()->src_desc(), gpu_engine));
     }
 
     primitive_src_desc_ = fwd_primitive_desc_.get()->src_desc();
@@ -171,18 +176,34 @@ class MklDnnPool : public MklDnnKernel {
       primitive_dst_mem_.reset(
           new mkldnn::memory(fwd_primitive_desc_.get()->dst_desc(), cpu_engine));
     }
+
+	primitive_dst_mem_gpu_.reset(
+        new mkldnn::memory(fwd_primitive_desc_.get()->dst_desc(), gpu_engine));
+
     pool_fwd_.reset(
         new mkldnn::pooling_forward(*fwd_primitive_desc_));
 
-    net.push_back(*pool_fwd_);
+    //reorder src mem from cpu to gpu
+    net.push_back(mkldnn::reorder(*src_mem_, *src_mem_gpu_));
     net_args.push_back({{MKLDNN_ARG_SRC, *src_mem_},
+                        {MKLDNN_ARG_DST, *src_mem_gpu_}});
+
+    net.push_back(*pool_fwd_);
+    net_args.push_back({{MKLDNN_ARG_SRC, *src_mem_gpu_},
+                        {MKLDNN_ARG_DST, *primitive_dst_mem_gpu_}});
+
+    //reorder dst mem from gpu to cpu
+    net.push_back(mkldnn::reorder(*primitive_dst_mem_gpu_, *primitive_dst_mem_));
+    net_args.push_back({{MKLDNN_ARG_SRC, *primitive_dst_mem_gpu_},
                         {MKLDNN_ARG_DST, *primitive_dst_mem_}});
-    if (mklnode_ptr_->output_index >= 0) {
-      // one of the end nodes. Allocate output buffer memory and
-      // reorder is necessary
-      mkldnn::memory::data_type t = MklDnnType<T>();
-      InitDstReorderOutput(cpu_engine, t, net, net_args);
-    }
+
+    //if (mklnode_ptr_->output_index >= 0) {
+    //  // one of the end nodes. Allocate output buffer memory and
+    //  // reorder is necessary
+    //  mkldnn::memory::data_type t = MklDnnType<T>();
+    //  InitDstReorderOutput(cpu_engine, t, net, net_args);
+    //}
+
     return Status::OK();
   }
 
@@ -233,11 +254,12 @@ class MklDnnPool : public MklDnnKernel {
       OrtValue* output = ort.KernelContext_GetOutput(context, mklnode_ptr_->output_index, &y_dims[0], static_cast<int>(primitive_dst_shape_.GetDims().size()));
       T* dst_data = ort.GetTensorMutableData<T>(output);
 
-      if (primitive_dst_desc_ != ort_source_desc_) {
+      /*if (primitive_dst_desc_ != ort_source_desc_) {
         reorder_dst_mem_to_->set_data_handle(dst_data);
       } else {
         primitive_dst_mem_->set_data_handle(dst_data);
-      }
+      }*/
+      primitive_dst_mem_->set_data_handle(dst_data);
     }
     return Status::OK();
   }
@@ -312,6 +334,7 @@ class MklDnnPool : public MklDnnKernel {
   size_t dst_size_;
 
   std::shared_ptr<mkldnn::memory> src_mem_;
+  std::shared_ptr<mkldnn::memory> src_mem_gpu_;
 
   std::unique_ptr<mkldnn::pooling_forward::desc> fwd_desc_;
   std::unique_ptr<mkldnn::memory::desc> src_md_;
@@ -329,9 +352,9 @@ class MklDnnPool : public MklDnnKernel {
     bool is_2D = src_dims_mkl.size() == 4 ? true : false;
     mkldnn::memory::format_tag fmt = mkldnn::memory::format_tag::any;
     if (CPUIDInfo::GetCPUIDInfo().HasAVX512f()) {
-      fmt = is_2D ? mkldnn::memory::format_tag::nChw16c : mkldnn::memory::format_tag::nCdhw16c;
+      fmt = is_2D ? mkldnn::memory::format_tag::nchw : mkldnn::memory::format_tag::ncdhw;
     } else if (CPUIDInfo::GetCPUIDInfo().HasAVX2() && (src_dims_mkl[1] % 8 == 0)) {
-      fmt = is_2D ? mkldnn::memory::format_tag::nChw8c : mkldnn::memory::format_tag::ncdhw;
+      fmt = is_2D ? mkldnn::memory::format_tag::nchw : mkldnn::memory::format_tag::ncdhw;
     } else {
       fmt = is_2D ? mkldnn::memory::format_tag::nchw : mkldnn::memory::format_tag::ncdhw;
     }
